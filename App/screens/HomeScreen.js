@@ -6,228 +6,454 @@ import {
   StyleSheet,
   Alert,
   ActivityIndicator,
+  StatusBar,
+  Dimensions,
+  Image,
+  ImageBackground,
+  Platform,
+  ScrollView,
+  Modal,
+  BackHandler,
 } from 'react-native';
 import {AuthContext} from '../context/AuthContext';
 import QRCodeScanner from 'react-native-qrcode-scanner';
 import {RNCamera} from 'react-native-camera';
-import FindVolunteerScreen from './FindVolunteerScreen';
 import axios from 'axios';
-import {getApiConfig} from '../config';
+import {getBaseUrl} from '../config/env';
 import {
   widthPercentageToDP as wp,
   heightPercentageToDP as hp,
 } from 'react-native-responsive-screen';
+import LinearGradient from 'react-native-linear-gradient';
+import VolunteerPage from './VolunteerPage';
 
 const getTodayDate = () => {
   const today = new Date();
-  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
-    2,
-    '0',
-  )}-${String(today.getDate()).padStart(2, '0')}`;
+  // Convert to UTC+5:00 timezone (Pakistan time)
+  const utcDate = new Date(today.getTime() + 5 * 60 * 60 * 1000);
+  return `${utcDate.getUTCFullYear()}-${String(
+    utcDate.getUTCMonth() + 1,
+  ).padStart(2, '0')}-${String(utcDate.getUTCDate()).padStart(2, '0')}`;
 };
 
+const getYesterdayDate = () => {
+  const today = new Date();
+  // Convert to UTC+5:00 timezone (Pakistan time) and subtract 24 hours
+  const utcDate = new Date(
+    today.getTime() + 5 * 60 * 60 * 1000 - 24 * 60 * 60 * 1000,
+  );
+  return `${utcDate.getUTCFullYear()}-${String(
+    utcDate.getUTCMonth() + 1,
+  ).padStart(2, '0')}-${String(utcDate.getUTCDate()).padStart(2, '0')}`;
+};
+
+const CustomAlert = ({
+  visible,
+  title,
+  message,
+  onPress,
+  onClose,
+  buttonText,
+  secondaryButtonText,
+  onSecondaryPress,
+}) => {
+  if (!visible) return null;
+  return (
+    <Modal
+      transparent
+      visible={visible}
+      animationType="fade"
+      onRequestClose={onClose}>
+      <View style={styles.alertOverlay}>
+        <View style={styles.alertContainer}>
+          <View style={styles.alertContent}>
+            <Text style={styles.alertTitle}>{title}</Text>
+            <Text style={styles.alertMessage}>{message}</Text>
+            <View style={styles.alertButtonContainer}>
+              {secondaryButtonText && (
+                <TouchableOpacity
+                  style={[styles.alertButton, styles.alertSecondaryButton]}
+                  onPress={onSecondaryPress}>
+                  <Text style={styles.alertSecondaryButtonText}>
+                    {secondaryButtonText}
+                  </Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={[styles.alertButton, styles.alertPrimaryButton]}
+                onPress={onPress}>
+                <Text style={styles.alertPrimaryButtonText}>
+                  {buttonText || 'OK'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+};
+
+const {width, height} = Dimensions.get('window');
+const isTablet = width >= 768;
+
 export const HomeScreen = ({navigation}) => {
-  const {logout} = useContext(AuthContext);
-  const [selectedOption, setSelectedOption] = useState('scan');
+  const {logout, userToken} = useContext(AuthContext);
+  const [selectedOption, setSelectedOption] = useState(null);
   const [showScanner, setShowScanner] = useState(false);
-  const [showVolunteerModal, setShowVolunteerModal] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [scannedData, setScannedData] = useState(null);
+  const [isScanning, setIsScanning] = useState(false);
+  const [isUpdatingMeal, setIsUpdatingMeal] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
+  const [scanFrameColor, setScanFrameColor] = useState('#FFFFFF');
+  const [scannerRef, setScannerRef] = useState(null);
+  const [alertConfig, setAlertConfig] = useState({
+    visible: false,
+    title: '',
+    message: '',
+    onSuccess: null,
+    buttonText: 'OK',
+    secondaryButtonText: null,
+    onSecondaryPress: null,
+  });
+
+  useEffect(() => {
+    const backHandler = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        if (showScanner) {
+          setShowScanner(false);
+          return true;
+        }
+        return false;
+      },
+    );
+
+    return () => backHandler.remove();
+  }, [showScanner]);
+
+  const handleMealAvail = async (userData, isLunchTime) => {
+    try {
+      setIsUpdatingMeal(true);
+      const baseUrl = getBaseUrl();
+      const formattedDate = getTodayDate();
+      const currentDate = new Date();
+      const currentTime = currentDate.toISOString().split('T')[1].split('.')[0];
+
+      const lunchTakenOn = isLunchTime
+        ? `${formattedDate}T${currentTime}`
+        : userData.lunch_takenon || null;
+
+      const dinnerTakenOn = !isLunchTime
+        ? `${formattedDate}T${currentTime}`
+        : userData.dinner_takenon || null;
+
+      const requestData = {
+        registration_id: parseInt(userData.registration_id),
+        date: formattedDate,
+        lunch: isLunchTime ? 1 : userData.lunch,
+        dinner: isLunchTime ? userData.dinner : 1,
+        lunch_takenon: lunchTakenOn,
+        dinner_takenon: dinnerTakenOn,
+      };
+
+      console.log('=== MEAL AVAIL API CALL DETAILS ===');
+      console.log('Registration ID:', userData.registration_id);
+      console.log('Date:', formattedDate);
+      console.log('Meal Type:', isLunchTime ? 'Lunch' : 'Dinner');
+      console.log('Request Data:', requestData);
+      console.log('Using URL:', `${baseUrl}/api/v1/user/update`);
+
+      const updateResponse = await axios.post(
+        `${baseUrl}/api/v1/user/update`,
+        requestData,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${userToken}`,
+          },
+        },
+      );
+
+      if (updateResponse.data) {
+        setScannedData(updateResponse.data);
+        showAlert(
+          '🎉 Success!',
+          `\n${
+            isLunchTime ? 'Lunch' : 'Dinner'
+          } has been successfully availed.\n\nThank you for using our service!`,
+          () => {
+            setShowScanner(false);
+            setScanFrameColor('#FFFFFF');
+          },
+          'OK',
+          null,
+          null,
+        );
+      }
+    } catch (error) {
+      console.error('Error updating meal status:', error);
+      setScanFrameColor('#FF5252');
+      showAlert(
+        '❌ Error',
+        '\nFailed to update meal status.\n\nPlease try again later.',
+        () => {
+          setScanFrameColor('#FFFFFF');
+        },
+        'OK',
+        null,
+        null,
+      );
+    } finally {
+      setIsUpdatingMeal(false);
+    }
+  };
 
   const handleContinue = async () => {
     if (selectedOption === 'scan') {
       setShowScanner(true);
     } else if (selectedOption === 'menu') {
-      setShowVolunteerModal(true);
+      navigation.navigate('VolunteerPage');
     }
+  };
+
+  const handleSessionExpired = () => {
+    Alert.alert(
+      'Session Expired',
+      'Your session has expired. Please login again.',
+      [
+        {
+          text: 'OK',
+          onPress: async () => {
+            await logout();
+            navigation.reset({
+              index: 0,
+              routes: [{name: 'Login'}],
+            });
+          },
+        },
+      ],
+    );
   };
 
   const fetchUserData = async registrationId => {
     try {
-      setIsLoading(true);
-      const todayDate = getTodayDate();
-      console.log("Today's date:", todayDate);
+      setIsSearching(true);
+      setScanFrameColor('#4CAF50');
+      const baseUrl = getBaseUrl();
+      const cleanRegistrationId = registrationId.trim();
 
-      const cleanRegistrationId = registrationId.replace(/[^0-9]/g, '');
-      console.log('Cleaned Registration ID:', cleanRegistrationId);
+      if (!cleanRegistrationId) {
+        throw new Error('Please enter registration ID');
+      }
 
-      const apiUrl = `${
-        getApiConfig().BASE_URL
-      }/api/foodtrucks/schedule?registrationid=${cleanRegistrationId}&date=${todayDate}`;
-      console.log('Making API request to:', apiUrl);
+      if (!/^\d+$/.test(cleanRegistrationId)) {
+        throw new Error('Registration ID must contain only numbers');
+      }
+
+      const todayFormatted = getTodayDate();
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayFormatted = yesterday.toISOString().split('T')[0];
 
       const headers = {
         'Content-Type': 'application/json',
         Accept: 'application/json',
+        Authorization: `Bearer ${userToken}`,
       };
-      console.log('Request Headers:', headers);
 
-      const response = await axios.get(apiUrl, {
+      // Try today's data first
+      let apiUrl = `${baseUrl}/api/v1/user/search?registrationid=${cleanRegistrationId}&date=${todayFormatted}`;
+      console.log('API URL (Today):', apiUrl);
+
+      let response = await axios.get(apiUrl, {
         headers,
         validateStatus: function (status) {
           return status >= 200 && status < 500;
         },
       });
-      console.log('HomeScreen API Response:', response.data);
 
-      if (!response.data) {
-        throw new Error('No data received from server');
-      }
-
-      const currentHour = new Date().getHours();
-      const isLunchTime = currentHour < 16; // Before 4PM
-      const userData = response.data;
-
-      // Check if meal is available and automatically update if it is
+      // If today's data is not found, try yesterday's data
       if (
-        (isLunchTime && userData.lunch) ||
-        (!isLunchTime && userData.dinner)
+        response.status === 404 ||
+        response.data.detail === 'Audit log not found'
       ) {
-        try {
-          const patchData = {
-            registrationid: cleanRegistrationId,
-            date: todayDate,
-            lunch: isLunchTime ? false : userData.lunch,
-            dinner: isLunchTime ? userData.dinner : false,
-          };
+        console.log("Today's data not found, trying yesterday's data...");
+        apiUrl = `${baseUrl}/api/v1/user/search?registrationid=${cleanRegistrationId}&date=${yesterdayFormatted}`;
+        console.log('API URL (Yesterday):', apiUrl);
 
-          const patchResponse = await axios.patch(
-            `${getApiConfig().BASE_URL}/api/foodtrucks/schedule/`,
-            patchData,
-            {
-              headers: {
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-              },
-            },
-          );
+        response = await axios.get(apiUrl, {
+          headers,
+          validateStatus: function (status) {
+            return status >= 200 && status < 500;
+          },
+        });
 
-          if (patchResponse.data) {
-            setScannedData(patchResponse.data);
-            setShowScanner(false);
-            Alert.alert(
-              '🎉 Success!',
-              `\n${
-                isLunchTime ? 'Lunch' : 'Dinner'
-              } has been successfully availed.\n\nThank you for using our service!`,
-              [
-                {
-                  text: 'OK',
-                  style: 'default',
-                },
-              ],
-              {cancelable: false},
-            );
-          }
-        } catch (error) {
-          console.error('PATCH Error:', error);
+        if (
+          response.status === 404 ||
+          response.data.detail === 'Audit log not found'
+        ) {
+          setScanFrameColor('#FF5252');
           Alert.alert(
-            '❌ Error',
-            '\nFailed to update meal status.\n\nPlease try again later.',
+            '⏳ No Record Found',
+            `No meal record found for Registration ID ${cleanRegistrationId} for today or yesterday.`,
             [
               {
                 text: 'OK',
-                style: 'default',
+                onPress: () => {
+                  setScanFrameColor('#FFFFFF');
+                  if (showScanner) {
+                    setShowScanner(false);
+                  }
+                },
               },
             ],
-            {cancelable: false},
           );
+          return;
         }
-      } else {
-        setScannedData(userData);
-        setShowScanner(false);
-        const currentTime = new Date().getHours();
-        const isLunchTime = currentTime < 16; // Before 4PM
-        const nextMealMessage = isLunchTime
-          ? 'Dinner will be available after 4 PM.'
-          : 'Lunch will be available tomorrow.';
 
+        // Show yesterday's data with a note
+        const userData = response.data;
         Alert.alert(
-          'ℹ️ Meal Status',
-          `\n${
-            isLunchTime ? 'Lunch' : 'Dinner'
-          } has already been availed.\n\n${nextMealMessage}`,
+          "📅 Yesterday's Record Found",
+          `Name: ${userData.name}\nEntitlement Type: ${userData.entitlement_type}\nRegistration ID: ${userData.registration_id}\n\nNote: Today's record is not yet available in the database.`,
           [
             {
               text: 'OK',
-              style: 'default',
-            },
-          ],
-          {cancelable: false},
-        );
-      }
-    } catch (error) {
-      console.error('API Error:', error);
-      let errorMessage = 'Failed to fetch user data';
-      let errorTitle = '❌ Error';
-
-      if (error.message === 'Server not configured') {
-        errorMessage = 'Please configure server settings first';
-        Alert.alert(
-          '⚙️ Configuration Required',
-          '\nPlease configure server settings to continue.\n\nWould you like to configure now?',
-          [
-            {
-              text: 'Configure',
               onPress: () => {
-                setShowScanner(false);
-                navigation.navigate('Settings');
+                setScanFrameColor('#FFFFFF');
+                if (showScanner) {
+                  setShowScanner(false);
+                }
               },
-              style: 'default',
-            },
-            {
-              text: 'Cancel',
-              onPress: () => setShowScanner(false),
-              style: 'cancel',
             },
           ],
-          {cancelable: false},
         );
         return;
       }
 
-      if (error.response) {
-        if (error.response.status === 404) {
-          errorTitle = '🔍 User Not Found';
-          errorMessage =
-            'The registration ID you scanned does not exist in our system.';
-        } else if (error.response.status === 400) {
-          errorTitle = '⚠️ Invalid QR Code';
-          errorMessage =
-            error.response.data.error ||
-            'The QR code is not valid. Please try again.';
-        }
-      } else if (error.request) {
-        errorTitle = '🌐 Connection Error';
-        errorMessage =
-          'Unable to connect to the server. Please check your internet connection.';
-      }
+      // Handle today's data
+      if (response.data && response.data.registration_id) {
+        const userData = response.data;
+        const currentHour = new Date().getHours();
+        const isLunchTime = currentHour >= 11 && currentHour < 16;
+        const isDinnerTime = currentHour >= 16 && currentHour < 22;
+        const mealStatus = isLunchTime
+          ? userData.lunch === 0
+            ? 'Available'
+            : 'Already Availed'
+          : isDinnerTime
+          ? userData.dinner === 0
+            ? 'Available'
+            : 'Already Availed'
+          : 'Not Available';
 
-      Alert.alert(
-        errorTitle,
-        `\n${errorMessage}\n\nPlease try again.`,
-        [
-          {
-            text: 'OK',
-            onPress: () => setShowScanner(false),
-            style: 'default',
-          },
-        ],
-        {cancelable: false},
-      );
+        let nextMealMessage = '';
+        if (currentHour < 11) {
+          nextMealMessage = 'Lunch will be available at 11 AM.';
+        } else if (currentHour >= 22) {
+          nextMealMessage =
+            'Meals are not available at this time. Lunch will be available tomorrow at 11 AM.';
+        } else if (currentHour >= 16) {
+          if (userData.lunch === 1) {
+            nextMealMessage =
+              'You have already availed lunch. Dinner will be available until 10 PM.';
+          } else {
+            nextMealMessage = 'Dinner will be available until 10 PM.';
+          }
+        } else {
+          if (userData.lunch === 1) {
+            nextMealMessage =
+              'You have already availed lunch. You can avail dinner after 4 PM.';
+          } else {
+            nextMealMessage = 'Lunch will be available until 4 PM.';
+          }
+        }
+
+        if (mealStatus === 'Already Availed') {
+          Alert.alert(
+            '🍽️ Meal Status',
+            `Name: ${userData.name}\nEntitlement Type: ${userData.entitlement_type}\nRegistration ID: ${userData.registration_id}\n\n${nextMealMessage}`,
+            [
+              {
+                text: 'OK',
+                onPress: () => {
+                  setScanFrameColor('#FFFFFF');
+                  if (showScanner) {
+                    setShowScanner(false);
+                  }
+                },
+              },
+            ],
+          );
+        } else if (mealStatus === 'Not Available') {
+          Alert.alert(
+            '🍽️ Meal Status',
+            `Name: ${userData.name}\nEntitlement Type: ${userData.entitlement_type}\nRegistration ID: ${userData.registration_id}\n\n${nextMealMessage}`,
+            [
+              {
+                text: 'OK',
+                onPress: () => {
+                  setScanFrameColor('#FFFFFF');
+                  if (showScanner) {
+                    setShowScanner(false);
+                  }
+                },
+              },
+            ],
+          );
+        } else {
+          // If meal is available, directly call handleMealAvail
+          console.log('Meal is available, proceeding with meal avail...');
+          await handleMealAvail(userData, isLunchTime);
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching user data:', error);
+      setScanFrameColor('#FF5252');
+      if (error.response?.status === 401) {
+        handleSessionExpired();
+      } else {
+        Alert.alert(
+          'Error',
+          error.message || 'Failed to fetch user data. Please try again.',
+          [
+            {
+              text: 'OK',
+              onPress: () => {
+                setScanFrameColor('#FFFFFF');
+                if (showScanner) {
+                  setShowScanner(false);
+                }
+              },
+            },
+          ],
+        );
+      }
     } finally {
-      setIsLoading(false);
+      setIsSearching(false);
     }
   };
 
-  const onSuccess = e => {
+  const onBarCodeRead = async ({data}) => {
+    if (isScanning || isSearching || isUpdatingMeal) return; // Prevent multiple scans
     try {
-      console.log('QR Code Data:', e.data);
-      let registrationId = e.data;
+      setIsScanning(true);
+      setScanFrameColor('#4CAF50');
 
-      if (e.data.startsWith('{') || e.data.startsWith('[')) {
+      // Pause the scanner
+      if (scannerRef) {
+        scannerRef.pausePreview();
+      }
+
+      console.log('QR Code Data:', data);
+      let registrationId = data;
+
+      if (data.startsWith('{') || data.startsWith('[')) {
         try {
-          const parsedData = JSON.parse(e.data);
+          const parsedData = JSON.parse(data);
           registrationId =
             parsedData.registrationid ||
             parsedData.registrationId ||
@@ -246,127 +472,203 @@ export const HomeScreen = ({navigation}) => {
       registrationId = String(registrationId).replace(/[^0-9]/g, '');
       console.log('Sending registration ID to API:', registrationId);
 
-      fetchUserData(registrationId);
+      // Fetch user data
+      await fetchUserData(registrationId);
     } catch (error) {
       console.error('QR Code Error:', error);
-      Alert.alert(
+      setScanFrameColor('#FF5252');
+      showAlert(
         '⚠️ Error',
         '\nInvalid QR code format.\n\nPlease try again with a valid QR code.',
-        [
-          {
-            text: 'OK',
-            onPress: () => setShowScanner(false),
-            style: 'default',
-          },
-        ],
-        {cancelable: false},
+        () => {
+          setScanFrameColor('#FFFFFF');
+          if (scannerRef) {
+            scannerRef.resumePreview();
+          }
+        },
+        'OK',
+        null,
+        null,
       );
+    } finally {
+      setIsScanning(false);
+      // Reactivate the scanner after a short delay
+      setTimeout(() => {
+        if (scannerRef) {
+          scannerRef.resumePreview();
+        }
+      }, 1000);
     }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      navigation.reset({
+        index: 0,
+        routes: [{name: 'Login'}],
+      });
+    } catch (error) {
+      console.log('Logout navigation error:', error);
+    }
+  };
+
+  const showAlert = (
+    title,
+    message,
+    onSuccess,
+    buttonText,
+    secondaryButtonText,
+    onSecondaryPress,
+  ) => {
+    setAlertConfig({
+      visible: true,
+      title,
+      message,
+      onSuccess,
+      buttonText,
+      secondaryButtonText,
+      onSecondaryPress,
+    });
+  };
+
+  const handleAlertClose = () => {
+    if (alertConfig.onSuccess) {
+      alertConfig.onSuccess();
+    }
+    setAlertConfig({
+      visible: false,
+      title: '',
+      message: '',
+      onSuccess: null,
+      buttonText: 'OK',
+      secondaryButtonText: null,
+      onSecondaryPress: null,
+    });
   };
 
   if (showScanner) {
     return (
       <View style={styles.scannerContainer}>
-        {isLoading ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#4A90E2" />
-            <Text style={styles.loadingText}>Fetching user data...</Text>
+        <RNCamera
+          ref={ref => setScannerRef(ref)}
+          style={styles.scanner}
+          type={RNCamera.Constants.Type.back}
+          onBarCodeRead={onBarCodeRead}
+          captureAudio={false}
+          androidCameraPermissionOptions={{
+            title: 'Permission to use camera',
+            message: 'We need your permission to use your camera',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Cancel',
+          }}
+          iosCameraPermissionOptions={{
+            title: 'Permission to use camera',
+            message: 'We need your permission to use your camera',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Cancel',
+          }}>
+          <View style={styles.scanFrameContainer}>
+            <View style={[styles.scanFrame, {borderColor: scanFrameColor}]}>
+              {(isScanning || isSearching || isUpdatingMeal) && (
+                <View style={styles.loadingOverlay}>
+                  <ActivityIndicator size="large" color="#FFFFFF" />
+                  <Text style={styles.loadingText}>
+                    {isScanning
+                      ? 'Scanning...'
+                      : isSearching
+                      ? 'Searching...'
+                      : 'Updating...'}
+                  </Text>
+                </View>
+              )}
+            </View>
           </View>
-        ) : (
-          <QRCodeScanner
-            onRead={onSuccess}
-            flashMode={RNCamera.Constants.FlashMode.auto}
-            topContent={
-              <View style={styles.instructionBox}>
-                <Text style={styles.instructionTitle}>Scan QR Code</Text>
-                <Text style={styles.instructionText}>
-                  1. Position the QR code within the frame{'\n'}
-                  2. Hold steady until scanned{'\n'}
-                  3. Wait for confirmation
-                </Text>
-              </View>
-            }
-            bottomContent={
-              <TouchableOpacity
-                style={styles.buttonTouchable}
-                onPress={() => setShowScanner(false)}>
-                <Text style={styles.buttonText}>Cancel</Text>
-              </TouchableOpacity>
-            }
-            containerStyle={styles.scannerContainer}
-            cameraStyle={styles.camera}
-            topViewStyle={styles.topView}
-            bottomViewStyle={styles.bottomView}
-            cameraProps={{
-              style: styles.camera,
-              type: RNCamera.Constants.Type.back,
-              captureAudio: false,
-            }}
-          />
-        )}
+        </RNCamera>
       </View>
-    );
-  }
-
-  if (showVolunteerModal) {
-    return (
-      <FindVolunteerScreen
-        onClose={() => {
-          setShowVolunteerModal(false);
-          setScannedData(null);
-        }}
-        initialData={selectedOption === 'scan' ? scannedData : null}
-        registrationId={
-          selectedOption === 'scan' ? scannedData?.registrationid : null
-        }
-      />
     );
   }
 
   return (
     <View style={styles.container}>
-      <View style={styles.content}>
-        <Text style={styles.title}>Welcome to Food Management</Text>
-
-        <View style={styles.optionsContainer}>
-          <TouchableOpacity
-            style={[
-              styles.optionButton,
-              selectedOption === 'scan' && styles.selectedOption,
-            ]}
-            onPress={() => setSelectedOption('scan')}>
-            <Text
-              style={[
-                styles.optionText,
-                selectedOption === 'scan' && styles.selectedOptionText,
-              ]}>
-              Scan QR Code
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.optionButton,
-              selectedOption === 'menu' && styles.selectedOption,
-            ]}
-            onPress={() => setSelectedOption('menu')}>
-            <Text
-              style={[
-                styles.optionText,
-                selectedOption === 'menu' && styles.selectedOptionText,
-              ]}>
-              Find Volunteer
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      <View style={styles.bottomContainer}>
-        <TouchableOpacity
-          style={styles.continueButton}
-          onPress={handleContinue}>
-          <Text style={styles.continueButtonText}>Continue</Text>
+      <StatusBar backgroundColor="#FFFFFF" barStyle="dark-content" />
+      <View style={styles.headerContainer}>
+        <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+          <Text style={styles.logoutButtonText}>Logout</Text>
         </TouchableOpacity>
+      </View>
+      <View style={styles.mainContainer}>
+        <View style={styles.content}>
+          <Image
+            source={require('../Asset/Splash1.png')}
+            style={[styles.logo, isTablet && styles.logoTablet]}
+            resizeMode="contain"
+          />
+          <Text style={[styles.title, isTablet && styles.titleTablet]}>
+            Global Encounters
+          </Text>
+          <Text style={[styles.subtitle, isTablet && styles.subtitleTablet]}>
+            F&B Management
+          </Text>
+          <View style={styles.optionsContainer}>
+            <TouchableOpacity
+              style={[
+                styles.optionButton,
+                selectedOption === 'scan' && styles.selectedOption,
+                isTablet && styles.optionButtonTablet,
+                (isScanning || isUpdatingMeal || isSearching) &&
+                  styles.disabledButton,
+              ]}
+              onPress={() => {
+                setSelectedOption('scan');
+                setShowScanner(true);
+              }}
+              disabled={isScanning || isUpdatingMeal || isSearching}>
+              {isScanning || isSearching || isUpdatingMeal ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Text
+                  style={[
+                    styles.optionText,
+                    selectedOption === 'scan' && styles.selectedOptionText,
+                    isTablet && styles.optionTextTablet,
+                  ]}>
+                  Scan-Camera Open
+                </Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.optionButton,
+                selectedOption === 'menu' && styles.selectedOption,
+                isTablet && styles.optionButtonTablet,
+                (isScanning || isUpdatingMeal || isSearching) &&
+                  styles.disabledButton,
+              ]}
+              onPress={() => {
+                setSelectedOption('menu');
+                navigation.navigate('VolunteerPage', {
+                  initialData: null,
+                  registrationId: null,
+                  fromHome: true,
+                });
+              }}
+              disabled={isScanning || isUpdatingMeal || isSearching}>
+              {isSearching ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Text
+                  style={[
+                    styles.optionText,
+                    selectedOption === 'menu' && styles.selectedOptionText,
+                    isTablet && styles.optionTextTablet,
+                  ]}>
+                  Find Participant
+                </Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
       </View>
     </View>
   );
@@ -375,149 +677,273 @@ export const HomeScreen = ({navigation}) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: wp('5%'),
-    backgroundColor: '#fff',
+    backgroundColor: '#FFFFFF',
   },
-  content: {
-    flex: 1,
-    justifyContent: 'center',
-  },
-  title: {
-    fontSize: wp('6%'),
-    fontWeight: 'bold',
-    marginBottom: hp('5%'),
-    textAlign: 'center',
-    color: '#333',
-  },
-  optionsContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginBottom: hp('5%'),
-  },
-  optionButton: {
-    padding: hp('2%'),
-    borderRadius: wp('2%'),
-    backgroundColor: '#f0f0f0',
-    width: wp('40%'),
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: hp('10%'),
-  },
-  selectedOption: {
-    backgroundColor: '#007AFF',
-  },
-  optionText: {
-    fontSize: wp('4%'),
-    color: '#000',
-    textAlign: 'center',
-  },
-  selectedOptionText: {
-    color: '#fff',
-  },
-  bottomContainer: {
-    marginBottom: hp('2%'),
-  },
-  continueButton: {
-    backgroundColor: '#007AFF',
-    padding: hp('2%'),
-    borderRadius: wp('2%'),
-    alignItems: 'center',
-    marginBottom: hp('2%'),
-  },
-  continueButtonText: {
-    color: '#fff',
-    fontSize: wp('4.5%'),
-    fontWeight: 'bold',
-  },
-  settingsButton: {
-    backgroundColor: '#4CAF50',
-    padding: hp('2%'),
-    borderRadius: wp('2%'),
-    alignItems: 'center',
-    marginBottom: hp('2%'),
-  },
-  settingsButtonText: {
-    color: '#fff',
-    fontSize: wp('4.5%'),
-    fontWeight: 'bold',
+  headerContainer: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? hp('6%') : hp('3%'),
+    right: wp('5%'),
+    zIndex: 1,
   },
   logoutButton: {
-    backgroundColor: '#FF3B30',
-    padding: hp('2%'),
+    backgroundColor: '#1565C0',
+    paddingVertical: hp('1%'),
+    paddingHorizontal: wp('4%'),
     borderRadius: wp('2%'),
     alignItems: 'center',
   },
   logoutButtonText: {
     color: '#fff',
-    fontSize: wp('4.5%'),
-    fontWeight: 'bold',
+    fontSize: wp('3.5%'),
+    fontWeight: '600',
+    fontFamily: 'Poppins-SemiBold',
   },
-  scannerContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  loadingContainer: {
+  mainContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#fff',
-  },
-  loadingText: {
-    marginTop: hp('2%'),
-    fontSize: wp('4%'),
-    color: '#777',
-  },
-  instructionBox: {
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    borderRadius: wp('2%'),
-    paddingVertical: hp('2%'),
     paddingHorizontal: wp('4%'),
-    marginHorizontal: wp('4%'),
-    marginTop: hp('4%'),
-    marginBottom: hp('2%'),
-    width: wp('85%'),
-    alignSelf: 'center',
   },
-  instructionTitle: {
+  content: {
+    width: '100%',
+    maxWidth: 400,
+    alignItems: 'center',
+    borderRadius: 18,
+    padding: wp('6%'),
+  },
+  contentTablet: {
+    maxWidth: 500,
+    padding: 40,
+    borderRadius: 28,
+  },
+  title: {
+    fontSize: wp('8.5%'),
+    fontWeight: '800',
+    color: '#1565C0',
+    textAlign: 'center',
+    marginBottom: hp('0.8%'),
+    letterSpacing: wp('0.3%'),
+    fontFamily: 'Poppins-Bold',
+  },
+  titleTablet: {
+    fontSize: 38,
+    marginBottom: 8,
+  },
+  subtitle: {
     fontSize: wp('4.5%'),
-    color: '#fff',
-    fontWeight: 'bold',
-    marginBottom: hp('1%'),
+    color: '#666666',
     textAlign: 'center',
-  },
-  instructionText: {
-    fontSize: wp('3.5%'),
-    color: '#fff',
-    textAlign: 'center',
-    lineHeight: hp('2.5%'),
-  },
-  buttonTouchable: {
-    padding: hp('1.5%'),
-    backgroundColor: '#007AFF',
-    borderRadius: wp('2%'),
-    marginHorizontal: wp('4%'),
+    letterSpacing: wp('0.2%'),
+    fontWeight: '600',
     marginBottom: hp('4%'),
-    width: wp('85%'),
-    alignSelf: 'center',
+    fontFamily: 'Poppins-Medium',
   },
-  buttonText: {
-    fontSize: wp('4%'),
-    color: '#fff',
+  subtitleTablet: {
+    fontSize: 22,
+    marginBottom: 32,
+  },
+  optionsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: '100%',
+    paddingHorizontal: wp('2%'),
+    paddingVertical: hp('2%'),
+    gap: wp('3%'),
+  },
+  optionButton: {
+    flex: 1,
+    height: hp('8%'),
+    paddingHorizontal: wp('3%'),
+    borderRadius: wp('2%'),
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#1565C0',
+    minWidth: isTablet ? wp('30%') : wp('40%'),
+    maxWidth: isTablet ? wp('45%') : wp('50%'),
+  },
+  optionButtonTablet: {
+    height: hp('10%'),
+    paddingHorizontal: wp('4%'),
+    borderRadius: wp('3%'),
+  },
+  optionText: {
+    color: '#1565C0',
+    fontSize: wp('3.8%'),
+    fontWeight: '600',
+    fontFamily: 'Poppins-SemiBold',
     textAlign: 'center',
-    fontWeight: 'bold',
+    width: '100%',
   },
-  camera: {
+  optionTextTablet: {
+    fontSize: wp('3.5%'),
+    lineHeight: hp('3%'),
+  },
+  selectedOption: {
+    backgroundColor: '#1565C0',
+  },
+  selectedOptionText: {
+    color: '#fff',
+    fontFamily: 'Poppins-SemiBold',
+  },
+  scannerContainer: {
+    flex: 1,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#000000',
+  },
+  scanner: {
     flex: 1,
   },
-  topView: {
-    flex: 0,
-    backgroundColor: 'transparent',
-    paddingTop: hp('2%'),
+  scanFrameContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  bottomView: {
-    flex: 0,
-    backgroundColor: 'transparent',
-    paddingBottom: hp('2%'),
+  scanFrame: {
+    width: 250,
+    height: 250,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    borderRadius: 12,
+  },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: '#FFFFFF',
+    marginTop: 10,
+    fontSize: 16,
+    fontFamily: 'Poppins-Regular',
+  },
+  alertOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  alertContainer: {
+    width: wp('80%'),
+    maxWidth: isTablet ? 500 : 400,
+    borderRadius: wp('4%'),
+    overflow: 'hidden',
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  alertContent: {
+    padding: wp('5%'),
+    alignItems: 'center',
+  },
+  alertTitle: {
+    fontSize: isTablet ? wp('5%') : wp('4.5%'),
+    fontWeight: 'bold',
+    color: '#000000',
+    marginBottom: hp('1.5%'),
+    textAlign: 'center',
+    fontFamily: 'Poppins-Bold',
+  },
+  alertMessage: {
+    fontSize: isTablet ? wp('4%') : wp('3.5%'),
+    color: '#000000',
+    marginBottom: hp('2.5%'),
+    textAlign: 'center',
+    lineHeight: hp('3%'),
+    fontFamily: 'Poppins-Regular',
+  },
+  alertButtonContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: wp('2.5%'),
+    width: '100%',
+  },
+  alertButton: {
+    flex: 1,
+    paddingVertical: hp('1.5%'),
+    paddingHorizontal: wp('4%'),
+    borderRadius: wp('2%'),
+    alignItems: 'center',
+    minWidth: wp('30%'),
+  },
+  alertPrimaryButton: {
+    backgroundColor: '#1565C0',
+  },
+  alertSecondaryButton: {
+    backgroundColor: '#F5F5F5',
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+  },
+  alertPrimaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: isTablet ? wp('4%') : wp('3.5%'),
+    fontWeight: 'bold',
+    fontFamily: 'Poppins-SemiBold',
+  },
+  alertSecondaryButtonText: {
+    color: '#000000',
+    fontSize: isTablet ? wp('4%') : wp('3.5%'),
+    fontWeight: 'bold',
+    fontFamily: 'Poppins-SemiBold',
+  },
+  continueButton: {
+    backgroundColor: '#1565C0',
+    borderRadius: wp('3%'),
+    padding: wp('4%'),
+    alignItems: 'center',
+    width: '80%',
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+  },
+  continueButtonTablet: {
+    borderRadius: 16,
+    padding: 18,
+    width: '70%',
+  },
+  continueButtonText: {
+    color: '#fff',
+    fontSize: wp('4.5%'),
+    fontWeight: '600',
+    fontFamily: 'Poppins-SemiBold',
+    letterSpacing: 0.5,
+  },
+  continueButtonTextTablet: {
+    fontSize: 20,
+  },
+  logo: {
+    width: wp('40%'),
+    height: wp('40%'),
+    alignSelf: 'center',
+    marginBottom: hp('3%'),
+    maxWidth: 180,
+    maxHeight: 180,
+  },
+  logoTablet: {
+    width: 200,
+    height: 200,
+    marginBottom: 32,
+  },
+  disabledButton: {
+    opacity: 0.7,
   },
 });
 
